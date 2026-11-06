@@ -44,6 +44,7 @@
 #include "msm-qti-pp-config.h"
 #include "msm-dolby-dap-config.h"
 #include "msm-ds2-dap-config.h"
+#include <usb_dac_direct.h>
 
 #if defined(CONFIG_LVACFQ_V6)
 #include "../dsp/lvacfq_v6.h"
@@ -1860,6 +1861,25 @@ static int msm_routing_put_audio_mixer(struct snd_kcontrol *kcontrol,
 	struct soc_mixer_control *mc =
 		(struct soc_mixer_control *)kcontrol->private_value;
 	struct snd_soc_dapm_update *update = NULL;
+
+	/*
+	 * usb_dac_direct owns MM1→SLIMBUS_6 while enabled. Ignore AF attempts
+	 * to clear that session (or reconnect other FEs onto SLIM6 RX).
+	 */
+	if (usb_dac_direct_route_locked() &&
+	    mc->shift == MSM_BACKEND_DAI_SLIMBUS_6_RX) {
+		if (mc->rshift == MSM_FRONTEND_DAI_MULTIMEDIA1) {
+			if (!ucontrol->value.integer.value[0]) {
+				pr_debug("%s: usb_dac lock: ignore MM1→SLIM6 off\n",
+					 __func__);
+				return 0;
+			}
+		} else if (ucontrol->value.integer.value[0]) {
+			pr_debug("%s: usb_dac lock: ignore FE %d→SLIM6 on\n",
+				 __func__, mc->rshift);
+			return 0;
+		}
+	}
 
 	if (ucontrol->value.integer.value[0] &&
 	   msm_pcm_routing_route_is_set(mc->shift, mc->rshift) == false) {

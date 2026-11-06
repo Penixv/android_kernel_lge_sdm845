@@ -1,0 +1,6 @@
+id=usb_dac_manager
+name=USB DAC Manager (Mode A/B)
+version=v4.5.8
+versionCode=458
+author=twtter
+description=v4.5.8: distinct USB identities for Mode A and Mode B.

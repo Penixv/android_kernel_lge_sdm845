@@ -108,6 +108,15 @@ config SOUNDWIRE
 	tristate "SOUNDWIRE"
 config SOUNDWIRE_WCD_CTRL
 	tristate "SOUNDWIRE_WCD_CTRL"
+config USB_DAC_DIRECT
+	bool "USB DAC Direct (UAC2 gadget to tavil MM1/SLIM6)"
+	depends on SND_SOC_MSM_QDSP6V2_INTF
+	default y
+	help
+	  Kernel Mode A path: UAC2 gadget capture → MultiMedia1 → SLIMBUS_6
+	  → HPH/ESS. Sysfs /sys/kernel/usb_dac_direct/enable. Boot param
+	  usb_dac_direct.enable=0 disables.
+
 config USE_DEV_CTRL_VOLUME
 	tristate "USE_DEV_CTRL_VOLUME"
 config WCD9XXX_CODEC_CORE

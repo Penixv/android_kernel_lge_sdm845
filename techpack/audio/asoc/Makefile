@@ -1,4 +1,6 @@
 # MSM Machine Support
+ccflags-y += -I$(srctree)/techpack/audio/include \
+	-I$(srctree)/techpack/audio/include/uapi
 
 snd-soc-hostless-pcm-objs := msm-pcm-hostless.o
 obj-$(CONFIG_SND_SOC_MSM_HOSTLESS_PCM) += snd-soc-hostless-pcm.o

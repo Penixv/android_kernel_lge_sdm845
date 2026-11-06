@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>USB DAC Manager v4</title>
+<style>
+  :root { --bg:#0f1419; --card:#1a2332; --fg:#e7ecf3; --muted:#8b9bb4; --acc:#3d9cf0; --ok:#3dd68c; --warn:#f5a524; --danger:#c43c3c; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:15px/1.45 system-ui,sans-serif; background:var(--bg); color:var(--fg); padding:20px; max-width:540px; }
+  h1 { font-size:1.25rem; margin:0 0 4px; }
+  .sub { color:var(--muted); margin:0 0 16px; font-size:13px; }
+  .row { display:flex; flex-wrap:wrap; gap:10px; margin-bottom:12px; }
+  button { border:0; border-radius:10px; padding:12px 16px; font-weight:600; cursor:pointer; background:var(--acc); color:#fff; }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  button.secondary { background:#2a3548; }
+  button.danger { background:var(--danger); }
+  .card { background:var(--card); border-radius:12px; padding:14px 16px; margin-bottom:12px; }
+  .badge { display:inline-block; padding:4px 10px; border-radius:999px; font-size:12px; font-weight:700; }
+  .on { background:rgba(61,214,140,.2); color:var(--ok); }
+  .off { background:rgba(139,155,180,.2); color:var(--muted); }
+  .busy { background:rgba(245,165,36,.2); color:var(--warn); }
+  .bad { background:rgba(196,60,60,.2); color:#f88; }
+  label { display:flex; align-items:center; gap:8px; margin:10px 0; flex-wrap:wrap; }
+  select { background:#2a3548; color:var(--fg); border:0; border-radius:8px; padding:8px 12px; }
+  .note { font-size:12px; color:var(--muted); margin:8px 0 0; }
+  .warn { color:var(--warn); }
+  .hint { font-size:14px; margin-top:10px; font-weight:600; }
+  pre { white-space:pre-wrap; font-size:11px; color:var(--muted); margin:8px 0 0; max-height:200px; overflow:auto; }
+  .kv { display:grid; grid-template-columns:130px 1fr; gap:4px 10px; font-size:13px; margin-top:10px; }
+  .kv span:nth-child(odd) { color:var(--muted); }
+  .pill { display:inline-block; min-width:3.2em; text-align:center; padding:2px 8px; border-radius:6px; font-size:12px; font-weight:700; }
+  .pill.y { background:rgba(61,214,140,.25); color:var(--ok); }
+  .pill.n { background:rgba(139,155,180,.2); color:var(--muted); }
+</style>
+</head>
+<body>
+  <h1>USB DAC Manager v4</h1>
+  <p class="sub">模式 A：独占 PCM（停 audioserver）才算低延迟。若实际是 aaudio，与模式 B 同档，不算低延迟。</p>
+
+  <div class="card">
+    <span id="badge" class="badge off">…</span>
+    <div class="hint" id="hint">—</div>
+    <div class="kv" id="kv"></div>
+  </div>
+
+  <div class="row">
+    <button id="btnOn" onclick="doEnable()">启用</button>
+    <button id="btnOff" class="danger" onclick="doDisable()">关闭</button>
+  </div>
+
+  <div class="card">
+    <label>模式
+      <select id="mode">
+        <option value="a">模式 A · 低延迟直出 (PCM)</option>
+        <option value="b">模式 B · 高音质 HAL</option>
+      </select>
+    </label>
+    <label><input type="checkbox" id="hifi"/> 强制 HiFi Quad DAC</label>
+    <p class="note warn">运行中切换模式会重启桥接。模式 B 走 HAL，非 bit-perfect。不会自动拉满音量；Mode A 音量锁最高为 10，若启用前更低则保留低值。关闭 DAC 后恢复启用前的音量（含静音）。APK 会在连接电脑时询问是否启动 DAC。</p>
+  </div>
+
+  <div class="card"><pre id="log">—</pre></div>
+
+<script>
+const CTL = 'sh /data/adb/modules/usb_dac_manager/scripts/usb_dac_ctl.sh';
+const SJ = 'cat /data/adb/usb_dac/status.json 2>/dev/null';
+let busy = false;
+let st = {};
+
+function exec(cmd, ms) {
+  const timeout = ms || 20000;
+  return new Promise((resolve) => {
+    if (typeof ksu === 'undefined' || !ksu.exec) {
+      resolve({ code: -1, stdout: '', stderr: 'no ksu.exec' });
+      return;
+    }
+    const cb = 'cb_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
+    const timer = setTimeout(() => {
+      if (window[cb]) {
+        resolve({ code: -2, stdout: '', stderr: 'timeout' });
+        delete window[cb];
+      }
+    }, timeout);
+    window[cb] = (code, stdout, stderr) => {
+      clearTimeout(timer);
+      resolve({ code: code|0, stdout: stdout || '', stderr: stderr || '' });
+      delete window[cb];
+    };
+    try { ksu.exec(cmd, JSON.stringify({}), cb); }
+    catch (e) {
+      try { ksu.exec(cmd, cb); }
+      catch (e2) {
+        clearTimeout(timer);
+        resolve({ code: -3, stdout: '', stderr: String(e2) });
+      }
+    }
+  });
+}
+
+function pill(yes) {
+  return '<span class="pill ' + (yes ? 'y' : 'n') + '">' + (yes ? '是' : '否') + '</span>';
+}
+
+function render(s) {
+  st = s || {};
+  const ready = !!Number(s.ready);
+  const sound = !!Number(s.sound);
+  const modeA = !!Number(s.mode_a_active) || !!Number(s.exclusive_active);
+  const err = /^error/.test(s.state || '');
+  const live = (s.state === 'live') || ready;
+  const starting = ['binding','wait-uac','hifi','stop-audio','start-bridge','starting','route'].indexOf(s.state) >= 0;
+  const idle = (s.state === 'idle' || s.state === 'disabled' || !s.state);
+  const mode = (s.mode === 'a' || s.mode === 'exclusive') ? 'a' : 'b';
+
+  const badge = document.getElementById('badge');
+  if (err) { badge.className = 'badge bad'; badge.textContent = s.state; }
+  else if (sound) { badge.className = 'badge on'; badge.textContent = '有声音'; }
+  else if (ready) { badge.className = 'badge on'; badge.textContent = '就绪 · 等待播放'; }
+  else if (starting) { badge.className = 'badge busy'; badge.textContent = s.state || '启动中'; }
+  else if (idle) { badge.className = 'badge off'; badge.textContent = '关闭'; }
+  else { badge.className = 'badge busy'; badge.textContent = s.state || '…'; }
+
+  document.getElementById('hint').textContent = s.hint || '—';
+  document.getElementById('btnOn').disabled = busy || starting || live;
+  document.getElementById('btnOff').disabled = busy;
+  document.getElementById('mode').disabled = busy || starting;
+  document.getElementById('mode').value = mode;
+  document.getElementById('hifi').checked = !!Number(s.force_hifi);
+
+  document.getElementById('kv').innerHTML = [
+    ['可发声 ready', pill(ready)],
+    ['有帧 sound', pill(sound)],
+    ['Mode A 生效', pill(modeA)],
+    ['模式', mode === 'a' ? 'A 低延迟' : 'B HAL'],
+    ['实际桥接', s.mode_actual || '—'],
+    ['XRUN', (s.xruns != null ? s.xruns : '—')],
+    ['输入欠载 / 环溢出', (s.ring_underruns != null ? s.ring_underruns : '—') + ' / ' + (s.ring_overruns != null ? s.ring_overruns : '—')],
+    ['缓冲帧数', (s.ring_frames != null ? s.ring_frames : '—')],
+    ['时钟 skew ppm', (s.skew_ppm != null ? s.skew_ppm : '—')],
+    ['格式', (s.cap_fmt || '—') + ' → ' + (s.play_fmt || '—')],
+    ['帧数', (s.hb_frames != null ? s.hb_frames : '—') + ' (age ' + (s.hb_age != null ? s.hb_age : '—') + 's)'],
+    ['UAC / 播放', (s.uac_card || '—') + ' / ' + (s.play_card || '—')],
+    ['audioserver', Number(s.audioserver) ? '运行' : '已停'],
+    ['bit-perfect', Number(s.bit_perfect_claim) ? '声明' : '不声明']
+  ].map(([k,v]) => '<span>' + k + '</span><span>' + v + '</span>').join('');
+}
+
+async function readStatus() {
+  await exec(CTL + ' status >/dev/null 2>&1', 15000);
+  const r = await exec(SJ, 8000);
+  const m = (r.stdout || '').match(/\{[\s\S]*\}/);
+  if (!m) return { state: 'unknown', ready: 0, sound: 0, hint: '无 status.json' };
+  try { return JSON.parse(m[0]); } catch (e) { return { state: 'bad-json', hint: String(e) }; }
+}
+
+async function refresh(show) {
+  try {
+    const s = await readStatus();
+    render(s);
+    if (show) document.getElementById('log').textContent = JSON.stringify(s, null, 2);
+  } catch (e) {
+    document.getElementById('badge').className = 'badge bad';
+    document.getElementById('badge').textContent = '状态失败';
+    document.getElementById('log').textContent = String(e);
+  }
+}
+
+async function run(cmd) {
+  if (busy) return;
+  busy = true;
+  document.getElementById('mode').disabled = true;
+  document.getElementById('badge').className = 'badge busy';
+  document.getElementById('badge').textContent = '执行中…';
+  try {
+    const r = await exec(CTL + ' ' + cmd, 90000);
+    document.getElementById('log').textContent =
+      (r.stdout || '').slice(-4000) + (r.stderr ? '\n' + r.stderr : '') + '\n[exit ' + r.code + ']';
+  } finally {
+    busy = false;
+    await refresh(false);
+  }
+}
+
+async function doEnable() {
+  if (busy) return;
+  busy = true;
+  document.getElementById('mode').disabled = true;
+  document.getElementById('badge').className = 'badge busy';
+  document.getElementById('badge').textContent = '启用中…';
+  document.getElementById('hint').textContent = '后台绑定（USB 可能短暂断开）…';
+  try {
+    const mode = document.getElementById('mode').value;
+    const hifi = document.getElementById('hifi').checked;
+    await exec(CTL + ' mode-' + mode, 10000);
+    await exec(CTL + ' ' + (hifi ? 'hifi-on' : 'hifi-off'), 10000);
+    const r = await exec(CTL + ' enable', 20000);
+    document.getElementById('log').textContent =
+      (r.stdout || '').slice(-4000) + (r.stderr ? '\n' + r.stderr : '') + '\n[exit ' + r.code + ']';
+    for (let i = 0; i < 60; i++) {
+      await new Promise((res) => setTimeout(res, 1500));
+      const s = await readStatus();
+      render(s);
+      document.getElementById('log').textContent =
+        JSON.stringify(s, null, 2) + '\n--- poll ' + (i + 1) + '/60 ---';
+      const stt = s.state || '';
+      if (stt === 'live' || Number(s.ready) === 1) break;
+      if (/^error/.test(stt) || stt === 'idle') break;
+    }
+  } finally {
+    busy = false;
+    await refresh(true);
+  }
+}
+
+async function doDisable() { await run('disable'); }
+
+document.getElementById('mode').addEventListener('change', (e) => run('mode-' + e.target.value));
+document.getElementById('hifi').addEventListener('change', (e) => run(e.target.checked ? 'hifi-on' : 'hifi-off'));
+
+refresh(true);
+setInterval(() => { if (!busy) refresh(false); }, 1500);
+</script>
+</body>
+</html>
